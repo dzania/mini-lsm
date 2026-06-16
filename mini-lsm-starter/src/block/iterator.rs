@@ -47,8 +47,29 @@ impl BlockIterator {
     }
 
     /// Creates a block iterator and seek to the first entry.
+
     pub fn create_and_seek_to_first(block: Arc<Block>) -> Self {
-        unimplemented!()
+        let key_len = u16::from_be_bytes([block.data[0], block.data[1]]) as usize;
+
+        let key_start = 2;
+        let key_end = key_start + key_len;
+        let key = KeyVec::from_vec(block.data[key_start..key_end].to_vec());
+
+        let value_len_start = key_end;
+        let value_len =
+            u16::from_be_bytes([block.data[value_len_start], block.data[value_len_start + 1]])
+                as usize;
+
+        let value_start = value_len_start + 2;
+        let value_end = value_start + value_len;
+
+        Self {
+            block,
+            key: key.clone(),
+            idx: 0,
+            first_key: key,
+            value_range: (value_start, value_end),
+        }
     }
 
     /// Creates a block iterator and seek to the first key that >= `key`.
@@ -58,12 +79,12 @@ impl BlockIterator {
 
     /// Returns the key of the current entry.
     pub fn key(&self) -> KeySlice<'_> {
-        unimplemented!()
+        self.key.as_key_slice()
     }
 
     /// Returns the value of the current entry.
     pub fn value(&self) -> &[u8] {
-        unimplemented!()
+        &self.block.data[self.value_range.0..self.value_range.1]
     }
 
     /// Returns true if the iterator is valid.

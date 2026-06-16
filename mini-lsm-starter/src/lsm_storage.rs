@@ -295,10 +295,8 @@ impl LsmStorageInner {
     }
 
     /// Get a key from the storage. In day 7, this can be further optimized by using a bloom filter.
-
     pub fn get(&self, key: &[u8]) -> Result<Option<Bytes>> {
         let storage = self.state.read();
-
         for memtable in std::iter::once(&storage.memtable).chain(storage.imm_memtables.iter()) {
             match memtable.get(key) {
                 // Empty value is tombstone record so return None
@@ -362,7 +360,7 @@ impl LsmStorageInner {
     }
 
     /// Force freeze the current memtable to an immutable memtable
-    pub fn force_freeze_memtable(&self, state_lock_observer: &MutexGuard<'_, ()>) -> Result<()> {
+    pub fn force_freeze_memtable(&self, _state_lock_observer: &MutexGuard<'_, ()>) -> Result<()> {
         let id = self.next_sst_id();
         let memtable = MemTable::create(id);
         {
