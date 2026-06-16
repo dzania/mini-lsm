@@ -12,9 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#![allow(unused_variables)] // TODO(you): remove this lint after implementing this mod
-#![allow(dead_code)] // TODO(you): remove this lint after implementing this mod
-
 use std::cmp::{self};
 use std::collections::BinaryHeap;
 
@@ -24,6 +21,7 @@ use crate::key::KeySlice;
 
 use super::StorageIterator;
 
+#[derive(Debug)]
 struct HeapWrapper<I: StorageIterator>(pub usize, pub Box<I>);
 
 impl<I: StorageIterator> PartialEq for HeapWrapper<I> {
@@ -59,7 +57,20 @@ pub struct MergeIterator<I: StorageIterator> {
 
 impl<I: StorageIterator> MergeIterator<I> {
     pub fn create(iters: Vec<Box<I>>) -> Self {
-        unimplemented!()
+        let mut iters = iters
+            .into_iter()
+            .enumerate()
+            .filter_map(|(index, entry)| {
+                if entry.is_valid() {
+                    Some(HeapWrapper(index, entry))
+                } else {
+                    None
+                }
+            })
+            .collect::<BinaryHeap<_>>();
+
+        let current = iters.pop();
+        MergeIterator { iters, current }
     }
 }
 
@@ -69,18 +80,47 @@ impl<I: 'static + for<'a> StorageIterator<KeyType<'a> = KeySlice<'a>>> StorageIt
     type KeyType<'a> = KeySlice<'a>;
 
     fn key(&self) -> KeySlice<'_> {
-        unimplemented!()
+        self.current
+            .as_ref()
+            .expect("iterator must be valid when key is called")
+            .1
+            .key()
     }
 
     fn value(&self) -> &[u8] {
-        unimplemented!()
+        self.current
+            .as_ref()
+            .expect("iterator must be valid when key is called")
+            .1
+            .value()
     }
 
     fn is_valid(&self) -> bool {
-        unimplemented!()
+        self.current.is_some()
     }
 
     fn next(&mut self) -> Result<()> {
-        unimplemented!()
+        let current = self.current.take();
+        if let Some(mut current) = current {
+            let key = current.1.key().raw_ref().to_vec();
+            current.1.next()?;
+            if current.1.is_valid() {
+                self.iters.push(current);
+            };
+            while self
+                .iters
+                .peek()
+                .is_some_and(|top| top.1.key().raw_ref() == key)
+            {
+                let mut duplicate = self.iters.pop().expect("peek confirmed heap is non-empty");
+                duplicate.1.next()?;
+                if duplicate.1.is_valid() {
+                    self.iters.push(duplicate);
+                }
+            }
+            self.current = self.iters.pop();
+        }
+
+        Ok(())
     }
 }
