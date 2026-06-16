@@ -12,9 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#![allow(unused_variables)] // TODO(you): remove this lint after implementing this mod
-#![allow(dead_code)] // TODO(you): remove this lint after implementing this mod
-
 use std::collections::HashMap;
 use std::ops::Bound;
 use std::path::{Path, PathBuf};
@@ -30,9 +27,10 @@ use crate::compact::{
     CompactionController, CompactionOptions, LeveledCompactionController, LeveledCompactionOptions,
     SimpleLeveledCompactionController, SimpleLeveledCompactionOptions, TieredCompactionController,
 };
+use crate::iterators::merge_iterator::MergeIterator;
 use crate::lsm_iterator::{FusedIterator, LsmIterator};
 use crate::manifest::Manifest;
-use crate::mem_table::{self, MemTable};
+use crate::mem_table::{self, MemTable, map_bound};
 use crate::mvcc::LsmMvccInner;
 use crate::table::SsTable;
 
@@ -340,11 +338,6 @@ impl LsmStorageInner {
 
     /// Remove a key from the storage by writing an empty value.
     pub fn delete(&self, key: &[u8]) -> Result<()> {
-        let memtable = {
-            let storage = self.state.read();
-            Arc::clone(&storage.memtable)
-        };
-
         self.put(key, &[])
     }
 
@@ -394,9 +387,19 @@ impl LsmStorageInner {
     /// Create an iterator over a range of keys.
     pub fn scan(
         &self,
-        _lower: Bound<&[u8]>,
-        _upper: Bound<&[u8]>,
+        lower: Bound<&[u8]>,
+        upper: Bound<&[u8]>,
     ) -> Result<FusedIterator<LsmIterator>> {
-        unimplemented!()
+        let state = self.state.read();
+        let mut iters = Vec::with_capacity(state.imm_memtables.len() + 1);
+        iters.push(Box::new(state.memtable.scan(lower, upper)));
+        for memtable in &state.imm_memtables {
+            iters.push(Box::new(memtable.scan(lower, upper)));
+        }
+
+        let merge_iter = MergeIterator::create(iters);
+        let lsm_iter = LsmIterator::new(merge_iter)?;
+
+        Ok(FusedIterator::new(lsm_iter))
     }
 }
