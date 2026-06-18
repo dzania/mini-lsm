@@ -90,12 +90,27 @@ impl BlockIterator {
     /// Returns true if the iterator is valid.
     /// Note: You may want to make use of `key`
     pub fn is_valid(&self) -> bool {
-        unimplemented!()
+        !self.key().is_empty()
     }
 
     /// Seeks to the first key in the block.
     pub fn seek_to_first(&mut self) {
-        unimplemented!()
+        let key_len = u16::from_be_bytes([self.block.data[0], self.block.data[1]]) as usize;
+
+        let key_start = 2;
+        let key_end = key_start + key_len;
+        let key = KeyVec::from_vec(self.block.data[key_start..key_end].to_vec());
+
+        let value_len_start = key_end;
+        let value_len =
+            u16::from_be_bytes([self.block.data[value_len_start], self.block.data[value_len_start + 1]])
+                as usize;
+
+        let value_start = value_len_start + 2;
+        let value_end = value_start + value_len;
+        self.key = key;
+        self.value_range = (value_start, value_end);
+        self.idx = 0;
     }
 
     /// Move to the next key in the block.
