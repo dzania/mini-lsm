@@ -128,7 +128,6 @@ impl MemTable {
         let upper = map_bound(upper);
         let map = Arc::clone(&self.map);
 
-
         let mut iter = MemTableIteratorBuilder {
             map,
             iter_builder: |map| map.range((lower, upper)),

@@ -91,6 +91,7 @@ impl BlockIterator {
         self.key = key;
         entry.advance(key_len);
         let value_len = entry.get_u8() as usize;
+        // current offset + size of key_len + key + size of value_len
         let value_start = offset + 1 + key_len + 1;
         self.value_range = (value_start, value_start + value_len);
         entry.advance(value_len);
@@ -108,8 +109,6 @@ impl BlockIterator {
     }
 
     /// Seek to the first key that >= `key`.
-    /// Note: You should assume the key-value pairs in the block are sorted when being added by
-    /// callers.
     pub fn seek_to_key(&mut self, key: KeySlice) {
         let mut left = 0;
         let mut right = self.block.offsets.len();
