@@ -23,11 +23,10 @@ use std::fs::File;
 use std::path::Path;
 use std::sync::Arc;
 
-use anyhow::Result;
+use anyhow::{Result, anyhow, bail};
 pub use builder::SsTableBuilder;
 use bytes::{Buf, BufMut};
 pub use iterator::SsTableIterator;
-use rand::rand_core::block;
 
 use crate::block::Block;
 use crate::key::{KeyBytes, KeySlice};
@@ -159,7 +158,38 @@ impl SsTable {
 
     /// Open SSTable from a file.
     pub fn open(id: usize, block_cache: Option<Arc<BlockCache>>, file: FileObject) -> Result<Self> {
-        todo!();
+        if file.size() < 4 {
+            bail!("corrupt file: missing metadata footer");
+        }
+        let block_meta_offset = file.read(file.size() - 4, 4)?.as_slice().get_u32() as usize;
+        if block_meta_offset as u64 >= file.size() - 4 {
+            bail!("corrupt file: invalid metadata offset")
+        }
+        let block_meta_buf = file.read(
+            block_meta_offset as u64,
+            file.size() - 4 - block_meta_offset as u64,
+        )?;
+        let block_meta = BlockMeta::decode_block_meta(block_meta_buf.as_slice());
+        let first_key = block_meta
+            .first()
+            .map(|block| block.first_key.clone())
+            .ok_or_else(|| anyhow!("missing first key"))?;
+
+        let last_key = block_meta
+            .last()
+            .map(|block| block.last_key.clone())
+            .ok_or_else(|| anyhow!("missing last key"))?;
+        Ok(SsTable {
+            file,
+            block_meta,
+            block_meta_offset,
+            id,
+            block_cache,
+            first_key,
+            last_key,
+            bloom: None,
+            max_ts: 0,
+        })
     }
 
     /// Create a mock SST with only first key + last key metadata
@@ -184,19 +214,41 @@ impl SsTable {
 
     /// Read a block from the disk.
     pub fn read_block(&self, block_idx: usize) -> Result<Arc<Block>> {
-        // bla bla
+        let block_meta = self
+            .block_meta
+            .get(block_idx)
+            .ok_or_else(|| anyhow!("Invalid block"))?;
+
+        let offset: u64 = block_meta.offset as u64;
+        let end_offset = match self.block_meta.get(block_idx + 1) {
+            Some(next_block) => next_block.offset as u64,
+            None => self.block_meta_offset as u64,
+        };
+
+        if end_offset <= offset {
+            bail!("corrupt file: invalid block offsets");
+        }
+
+        let len = end_offset - offset;
+        let block = Block::decode(&self.file.read(offset, len)?);
+        Ok(Arc::new(block))
     }
 
-    /// Read a block from disk, with block cache. (Day 4)
+    /// Read a block from disk, with block cache.
     pub fn read_block_cached(&self, block_idx: usize) -> Result<Arc<Block>> {
-        unimplemented!()
+        match &self.block_cache {
+            Some(cache) => cache
+                .try_get_with((self.id, block_idx), || self.read_block(block_idx))
+                .map_err(|err| anyhow!("failed to load block {block_idx}: {err}")),
+            None => self.read_block(block_idx),
+        }
     }
 
     /// Find the block that may contain `key`.
-    /// Note: You may want to make use of the `first_key` stored in `BlockMeta`.
-    /// You may also assume the key-value pairs stored in each consecutive block are sorted.
     pub fn find_block_idx(&self, key: KeySlice) -> usize {
-        unimplemented!()
+        self.block_meta
+            .partition_point(|block_key| block_key.first_key.as_key_slice() <= key)
+            .saturating_sub(1)
     }
 
     /// Get number of data blocks.

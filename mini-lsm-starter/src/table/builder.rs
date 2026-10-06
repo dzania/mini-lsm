@@ -105,7 +105,7 @@ impl SsTableBuilder {
         let last_key = self
             .meta
             .last()
-            .map(|block| block.first_key.clone())
+            .map(|block| block.last_key.clone())
             .ok_or_else(|| anyhow::anyhow!("missing last key"))?;
 
         Ok(SsTable {
