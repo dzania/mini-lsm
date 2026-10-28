@@ -30,8 +30,10 @@ pub use simple_leveled::{
 };
 pub use tiered::{TieredCompactionController, TieredCompactionOptions, TieredCompactionTask};
 
+use crate::iterators::StorageIterator;
+use crate::iterators::merge_iterator::MergeIterator;
 use crate::lsm_storage::{LsmStorageInner, LsmStorageState};
-use crate::table::SsTable;
+use crate::table::{SsTable, SsTableBuilder, SsTableIterator};
 
 #[derive(Debug, Serialize, Deserialize)]
 pub enum CompactionTask {
@@ -123,8 +125,70 @@ pub enum CompactionOptions {
 }
 
 impl LsmStorageInner {
-    fn compact(&self, _task: &CompactionTask) -> Result<Vec<Arc<SsTable>>> {
-        unimplemented!()
+    fn compact(&self, task: &CompactionTask) -> Result<Vec<Arc<SsTable>>> {
+        let (l0_sstables, l1_sstables) = match task {
+            CompactionTask::ForceFullCompaction {
+                l0_sstables,
+                l1_sstables,
+            } => (l0_sstables, l1_sstables),
+            _ => todo!(),
+        };
+
+        let storage = {
+            let storage = self.state.read();
+            Arc::clone(&storage)
+        };
+
+        let mut sst_iters = Vec::with_capacity(l0_sstables.len() + l1_sstables.len());
+        for sst_idx in l0_sstables.iter().chain(l1_sstables) {
+            let table = storage
+                .sstables
+                .get(sst_idx)
+                .ok_or_else(|| anyhow::anyhow!("SST must exist"))?;
+            let sst_iter = SsTableIterator::create_and_seek_to_first(Arc::clone(table))?;
+            sst_iters.push(Box::new(sst_iter));
+        }
+        let mut merge_iter = MergeIterator::create(sst_iters);
+        let mut sst_tables = Vec::new();
+        let mut builder = SsTableBuilder::new(self.options.block_size);
+        let mut builder_has_entries = false;
+        while merge_iter.is_valid() {
+            // Empty value means tombstone record
+            if !merge_iter.value().is_empty() {
+                builder.add(merge_iter.key(), merge_iter.value());
+                builder_has_entries = true;
+
+                if builder.estimated_size() >= self.options.target_sst_size {
+                    let id = self.next_sst_id();
+                    let full_sst = std::mem::replace(
+                        &mut builder,
+                        SsTableBuilder::new(self.options.block_size),
+                    );
+                    builder_has_entries = false;
+
+                    let sst = full_sst.build(
+                        id,
+                        Some(Arc::clone(&self.block_cache)),
+                        self.path_of_sst(id),
+                    )?;
+                    sst_tables.push(Arc::new(sst));
+                }
+            }
+            merge_iter.next()?;
+        }
+
+        if builder_has_entries {
+            let id = self.next_sst_id();
+
+            let sst = builder.build(
+                id,
+                Some(Arc::clone(&self.block_cache)),
+                self.path_of_sst(id),
+            )?;
+            sst_tables.push(Arc::new(sst));
+        }
+
+        Ok(sst_tables)
     }
 
     pub fn force_full_compaction(&self) -> Result<()> {
