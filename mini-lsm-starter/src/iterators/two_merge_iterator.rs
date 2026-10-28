@@ -12,19 +12,23 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#![allow(unused_variables)] // TODO(you): remove this lint after implementing this mod
-#![allow(dead_code)] // TODO(you): remove this lint after implementing this mod
-
 use anyhow::Result;
 
 use super::StorageIterator;
+
+#[derive(PartialEq)]
+enum CurrentIterator {
+    A,
+    B,
+    Exhausted, // Both iterators exhausted
+}
 
 /// Merges two iterators of different types into one. If the two iterators have the same key, only
 /// produce the key once and prefer the entry from A.
 pub struct TwoMergeIterator<A: StorageIterator, B: StorageIterator> {
     a: A,
     b: B,
-    // Add fields as need
+    current: CurrentIterator,
 }
 
 impl<
@@ -33,7 +37,28 @@ impl<
 > TwoMergeIterator<A, B>
 {
     pub fn create(a: A, b: B) -> Result<Self> {
-        unimplemented!()
+        let mut iter = Self {
+            a,
+            b,
+            current: CurrentIterator::A,
+        };
+        iter.set_current();
+        Ok(iter)
+    }
+
+    fn set_current(&mut self) {
+        match (self.a.is_valid(), self.b.is_valid()) {
+            (false, false) => self.current = CurrentIterator::Exhausted,
+            (true, false) => self.current = CurrentIterator::A,
+            (false, true) => self.current = CurrentIterator::B,
+            (true, true) => {
+                if self.a.key() <= self.b.key() {
+                    self.current = CurrentIterator::A
+                } else {
+                    self.current = CurrentIterator::B
+                }
+            }
+        }
     }
 }
 
@@ -45,18 +70,40 @@ impl<
     type KeyType<'a> = A::KeyType<'a>;
 
     fn key(&self) -> Self::KeyType<'_> {
-        unimplemented!()
+        match self.current {
+            CurrentIterator::A => self.a.key(),
+            CurrentIterator::B => self.b.key(),
+            CurrentIterator::Exhausted => panic!("key() called on exhausted iterator"),
+        }
     }
 
     fn value(&self) -> &[u8] {
-        unimplemented!()
+        match self.current {
+            CurrentIterator::A => self.a.value(),
+            CurrentIterator::B => self.b.value(),
+            CurrentIterator::Exhausted => panic!("value() called on exhausted iterator"),
+        }
     }
 
     fn is_valid(&self) -> bool {
-        unimplemented!()
+        self.current != CurrentIterator::Exhausted
     }
 
     fn next(&mut self) -> Result<()> {
-        unimplemented!()
+        if self.current == CurrentIterator::Exhausted {
+            return Ok(());
+        }
+
+        if self.a.is_valid() && self.b.is_valid() && self.a.key() == self.b.key() {
+            self.b.next()?;
+        };
+
+        match self.current {
+            CurrentIterator::A => self.a.next()?,
+            CurrentIterator::B => self.b.next()?,
+            CurrentIterator::Exhausted => (),
+        }
+        self.set_current();
+        Ok(())
     }
 }
