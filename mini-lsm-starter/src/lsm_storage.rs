@@ -313,27 +313,16 @@ impl LsmStorageInner {
                 None => {}
             }
         }
+        let bound = Bound::Included(key);
+        let l0_merge = Self::create_l0_merge(&storage, bound, bound)?;
+        let l1_concat = Self::create_l1_concat(&storage, bound, bound)?;
+        let merged = TwoMergeIterator::create(l0_merge, l1_concat)?;
 
-        let mut sst_iters = Vec::with_capacity(storage.l0_sstables.len());
-        for sst_id in storage.l0_sstables.iter() {
-            let table = storage
-                .sstables
-                .get(sst_id)
-                .ok_or_else(|| anyhow::anyhow!("SST {sst_id} not found"))?;
-            let sst_iter = SsTableIterator::create_and_seek_to_key(
-                Arc::clone(table),
-                KeySlice::from_slice(key),
-            )?;
-            sst_iters.push(Box::new(sst_iter));
-        }
-        let sst_merge = MergeIterator::create(sst_iters);
-
-        if !sst_merge.is_valid() || sst_merge.key().raw_ref() != key || sst_merge.value().is_empty()
-        {
+        if !merged.is_valid() || merged.key().raw_ref() != key || merged.value().is_empty() {
             return Ok(None);
         }
 
-        Ok(Some(Bytes::copy_from_slice(sst_merge.value())))
+        Ok(Some(Bytes::copy_from_slice(merged.value())))
     }
 
     /// Write a batch of data into the storage. Implement in week 2 day 7.
@@ -450,12 +439,12 @@ impl LsmStorageInner {
             Arc::clone(&guard)
         };
         let memtable_merge = Self::create_memtable_merge(&snapshot, lower, upper);
-        let l0_merge = Self::create_l0_merge(&snapshot, lower)?;
-        let l1_concat = Self::create_l1_concat(&snapshot, lower)?;
+        let l0_merge = Self::create_l0_merge(&snapshot, lower, upper)?;
+        let l1_concat = Self::create_l1_concat(&snapshot, lower, upper)?;
 
         let memory_and_l0 = TwoMergeIterator::create(memtable_merge, l0_merge)?;
         let all_sources = TwoMergeIterator::create(memory_and_l0, l1_concat)?;
-        let lsm_iter = LsmIterator::new(all_sources)?;
+        let lsm_iter = LsmIterator::new(all_sources, upper.map(Bytes::copy_from_slice))?;
 
         Ok(FusedIterator::new(lsm_iter))
     }
@@ -473,9 +462,25 @@ impl LsmStorageInner {
         MergeIterator::create(iters)
     }
 
+    fn sst_overlaps_range(lower: Bound<&[u8]>, upper: Bound<&[u8]>, table: &Arc<SsTable>) -> bool {
+        let before_range = match lower {
+            Bound::Included(key) => table.last_key().raw_ref() < key,
+            Bound::Excluded(key) => table.last_key().raw_ref() <= key,
+            Bound::Unbounded => false,
+        };
+
+        let after_range = match upper {
+            Bound::Included(key) => table.first_key().raw_ref() > key,
+            Bound::Excluded(key) => table.first_key().raw_ref() >= key,
+            Bound::Unbounded => false,
+        };
+        !(before_range || after_range)
+    }
+
     fn create_l0_merge(
         snapshot: &LsmStorageState,
         lower: Bound<&[u8]>,
+        upper: Bound<&[u8]>,
     ) -> Result<MergeIterator<SsTableIterator>> {
         let mut iters = Vec::with_capacity(snapshot.l0_sstables.len());
         for sst_id in &snapshot.l0_sstables {
@@ -483,6 +488,10 @@ impl LsmStorageInner {
                 .sstables
                 .get(sst_id)
                 .ok_or_else(|| anyhow::anyhow!("SST {sst_id} not found"))?;
+            //SST doesn't contain any key in the range
+            if !Self::sst_overlaps_range(lower, upper, table) {
+                continue;
+            };
             let mut iter = match lower {
                 Bound::Unbounded => SsTableIterator::create_and_seek_to_first(Arc::clone(table))?,
                 Bound::Included(bytes) | Bound::Excluded(bytes) => {
@@ -506,6 +515,7 @@ impl LsmStorageInner {
     fn create_l1_concat(
         snapshot: &LsmStorageState,
         lower: Bound<&[u8]>,
+        upper: Bound<&[u8]>,
     ) -> Result<SstConcatIterator> {
         let l1_ids = &snapshot.levels[0].1;
         let mut tables = Vec::with_capacity(l1_ids.len());
@@ -514,6 +524,9 @@ impl LsmStorageInner {
                 .sstables
                 .get(sst_id)
                 .ok_or_else(|| anyhow::anyhow!("SST {sst_id} not found"))?;
+            if !Self::sst_overlaps_range(lower, upper, table) {
+                continue;
+            }
             tables.push(Arc::clone(table));
         }
         let mut iter = match lower {

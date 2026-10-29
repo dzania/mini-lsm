@@ -229,7 +229,7 @@ impl LsmStorageInner {
             state.levels[0].1 = output_ids;
             *guard = Arc::new(state);
         }
-        for sst_id in l0_sstables.into_iter().chain(l1_sstables) {
+        for sst_id in l0_sstables.iter().chain(l1_sstables) {
             std::fs::remove_file(self.path_of_sst(*sst_id))?;
         }
         Ok(())
@@ -265,6 +265,9 @@ impl LsmStorageInner {
     }
 
     fn trigger_flush(&self) -> Result<()> {
+        if self.state.read().imm_memtables.len() >= self.options.num_memtable_limit {
+            self.force_flush_next_imm_memtable()?;
+        };
         Ok(())
     }
 

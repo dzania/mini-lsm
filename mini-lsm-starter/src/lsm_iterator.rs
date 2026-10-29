@@ -12,7 +12,10 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::ops::Bound;
+
 use anyhow::Result;
+use bytes::Bytes;
 
 use crate::{
     iterators::{
@@ -31,15 +34,16 @@ type LsmIteratorInner = TwoMergeIterator<
 
 pub struct LsmIterator {
     inner: LsmIteratorInner,
+    end_bound: Bound<Bytes>,
 }
 
 impl LsmIterator {
-    pub(crate) fn new(mut inner: LsmIteratorInner) -> Result<Self> {
+    pub(crate) fn new(mut inner: LsmIteratorInner, end_bound: Bound<Bytes>) -> Result<Self> {
         // Skip tombstone records
         while inner.is_valid() && inner.value().is_empty() {
             inner.next()?;
         }
-        Ok(Self { inner })
+        Ok(Self { inner, end_bound })
     }
 }
 
@@ -47,7 +51,16 @@ impl StorageIterator for LsmIterator {
     type KeyType<'a> = &'a [u8];
 
     fn is_valid(&self) -> bool {
-        self.inner.is_valid()
+        if !self.inner.is_valid() {
+            return false;
+        }
+
+        let key = self.key();
+        match &self.end_bound {
+            Bound::Included(end) => key <= end.as_ref(),
+            Bound::Excluded(end) => key < end.as_ref(),
+            Bound::Unbounded => true,
+        }
     }
 
     fn key(&self) -> &[u8] {
@@ -64,6 +77,10 @@ impl StorageIterator for LsmIterator {
             self.inner.next()?;
         }
         Ok(())
+    }
+
+    fn num_active_iterators(&self) -> usize {
+        self.inner.num_active_iterators()
     }
 }
 
@@ -122,5 +139,9 @@ impl<I: StorageIterator> StorageIterator for FusedIterator<I> {
                 Err(err)
             }
         }
+    }
+
+    fn num_active_iterators(&self) -> usize {
+        self.iter.num_active_iterators()
     }
 }
