@@ -19,6 +19,7 @@ mod leveled;
 mod simple_leveled;
 mod tiered;
 
+use std::ops::Deref;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -192,7 +193,46 @@ impl LsmStorageInner {
     }
 
     pub fn force_full_compaction(&self) -> Result<()> {
-        unimplemented!()
+        let task = {
+            let state = self.state.read();
+            CompactionTask::ForceFullCompaction {
+                l0_sstables: state.l0_sstables.clone(),
+                l1_sstables: state.levels[0].1.clone(),
+            }
+        };
+
+        let new_ssts = self.compact(&task)?;
+
+        let CompactionTask::ForceFullCompaction {
+            l0_sstables,
+            l1_sstables,
+        } = &task
+        else {
+            unreachable!("task was constructed as ForceFullCompaction");
+        };
+
+        {
+            let state_lock = self.state_lock.lock();
+            let mut guard = self.state.write();
+            let mut state = (**guard).clone();
+            // Remove compacted inputs.
+            for id in l0_sstables.iter().chain(l1_sstables) {
+                state.sstables.remove(id);
+            }
+            // Register replacement tables.
+            let output_ids = new_ssts.iter().map(|sst| sst.sst_id()).collect();
+            for sst in new_ssts {
+                state.sstables.insert(sst.sst_id(), sst);
+            }
+            // Update level membership.
+            state.l0_sstables.retain(|id| !l0_sstables.contains(id));
+            state.levels[0].1 = output_ids;
+            *guard = Arc::new(state);
+        }
+        for sst_id in l0_sstables.into_iter().chain(l1_sstables) {
+            std::fs::remove_file(self.path_of_sst(*sst_id))?;
+        }
+        Ok(())
     }
 
     fn trigger_compaction(&self) -> Result<()> {
