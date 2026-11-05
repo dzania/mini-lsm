@@ -1,4 +1,4 @@
-// Copyright (c) 2022-2025 Alex Chi Z
+// Copyright (c) 20r2-2025 Alex Chi Z
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -158,18 +158,33 @@ impl SsTable {
 
     /// Open SSTable from a file.
     pub fn open(id: usize, block_cache: Option<Arc<BlockCache>>, file: FileObject) -> Result<Self> {
-        if file.size() < 4 {
-            bail!("corrupt file: missing metadata footer");
+        let file_size = file.size();
+        if file_size < 8 {
+            bail!("corrupt file: missing footer");
         }
-        let block_meta_offset = file.read(file.size() - 4, 4)?.as_slice().get_u32() as usize;
-        if block_meta_offset as u64 >= file.size() - 4 {
-            bail!("corrupt file: invalid metadata offset")
+
+        let bloom_end = file_size - 4;
+        let bloom_offset = u64::from(file.read(bloom_end, 4)?.as_slice().get_u32());
+
+        if bloom_offset < 4 || bloom_offset >= bloom_end {
+            bail!("corrupt file: invalid bloom offset");
         }
-        let block_meta_buf = file.read(
+
+        let bloom_bytes = file.read(bloom_offset, bloom_end - bloom_offset)?;
+        let bloom = Bloom::decode(&bloom_bytes)?;
+
+        let metadata_end = bloom_offset - 4;
+        let block_meta_offset = file.read(metadata_end, 4)?.as_slice().get_u32() as usize;
+
+        if block_meta_offset as u64 >= metadata_end {
+            bail!("corrupt file: invalid metadata offset");
+        }
+
+        let metadata_bytes = file.read(
             block_meta_offset as u64,
-            file.size() - 4 - block_meta_offset as u64,
+            metadata_end - block_meta_offset as u64,
         )?;
-        let block_meta = BlockMeta::decode_block_meta(block_meta_buf.as_slice());
+        let block_meta = BlockMeta::decode_block_meta(metadata_bytes.as_slice());
         let first_key = block_meta
             .first()
             .map(|block| block.first_key.clone())
@@ -187,7 +202,7 @@ impl SsTable {
             block_cache,
             first_key,
             last_key,
-            bloom: None,
+            bloom: Some(bloom),
             max_ts: 0,
         })
     }

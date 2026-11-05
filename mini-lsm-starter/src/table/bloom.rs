@@ -17,6 +17,8 @@
 use anyhow::Result;
 use bytes::{BufMut, Bytes, BytesMut};
 
+const BLOOM_HASH_ROTATION: u32 = 15;
+
 /// Implements a bloom filter
 pub struct Bloom {
     /// data of filter in bits
@@ -92,7 +94,16 @@ impl Bloom {
         let mut filter = BytesMut::with_capacity(nbytes);
         filter.resize(nbytes, 0);
 
-        // TODO: build the bloom filter
+        for key in keys {
+            let mut hash = *key;
+            let delta = hash.rotate_left(BLOOM_HASH_ROTATION);
+
+            for _ in 0..k {
+                let position = (hash as usize) % nbits;
+                filter.set_bit(position, true);
+                hash = hash.wrapping_add(delta);
+            }
+        }
 
         Self {
             filter: filter.freeze(),
@@ -107,9 +118,17 @@ impl Bloom {
             true
         } else {
             let nbits = self.filter.bit_len();
-            let delta = h.rotate_left(15);
+            let delta = h.rotate_left(BLOOM_HASH_ROTATION);
+            let mut h = h;
 
-            // TODO: probe the bloom filter
+            for _ in 0..self.k {
+                let position = (h as usize) % nbits;
+                if !self.filter.get_bit(position) {
+                    return false;
+                }
+
+                h = h.wrapping_add(delta);
+            }
 
             true
         }

@@ -47,20 +47,37 @@ impl BlockBuilder {
     /// You may find the `bytes::BufMut` trait useful for manipulating binary data.
     #[must_use]
     pub fn add(&mut self, key: KeySlice, value: &[u8]) -> bool {
-        let entry_len = SIZEOF_U16 + key.len() + SIZEOF_U16 + value.len();
+        // TODO: Add guard it fits in u16
+        let overlap = self
+            .first_key
+            .raw_ref()
+            .iter()
+            .zip(key.raw_ref().iter())
+            .take_while(|(first, current)| first == current)
+            .count();
+        let suffix = &key.raw_ref()[overlap..];
+        // Entry size: overlap length (u16) + suffix length (u16) + suffix bytes
+        //           + value length (u16) + value bytes.
+        let entry_len = SIZEOF_U16 + SIZEOF_U16 + suffix.len() + SIZEOF_U16 + value.len();
+        // Reserve two bytes per entry offset, including the new entry, plus two bytes for the entry count.
         let estimated_size =
-            entry_len + self.data.len() + self.offsets.len() * SIZEOF_U16 + SIZEOF_U16;
+            self.data.len() + entry_len + (self.offsets.len() + 1) * SIZEOF_U16 + SIZEOF_U16;
 
         if !self.is_empty() && estimated_size > self.block_size {
             return false;
         };
         self.offsets.push(self.data.len() as u16);
 
-        self.data.put_u8(key.len() as u8);
-        self.data.extend_from_slice(key.into_inner());
-
-        self.data.put_u8(value.len() as u8);
+        self.data.put_u16(overlap as u16);
+        self.data.put_u16(suffix.len() as u16);
+        self.data.extend_from_slice(suffix);
+        self.data.put_u16(value.len() as u16);
         self.data.extend_from_slice(value);
+
+        if self.first_key.is_empty() {
+            self.first_key = KeyVec::from_vec(suffix.to_vec());
+        }
+
         true
     }
 

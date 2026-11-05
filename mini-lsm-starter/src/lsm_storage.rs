@@ -314,8 +314,9 @@ impl LsmStorageInner {
             }
         }
         let bound = Bound::Included(key);
-        let l0_merge = Self::create_l0_merge(&storage, bound, bound)?;
-        let l1_concat = Self::create_l1_concat(&storage, bound, bound)?;
+        let key_hash = farmhash::fingerprint32(key);
+        let l0_merge = Self::create_l0_merge(&storage, bound, bound, Some(key_hash))?;
+        let l1_concat = Self::create_l1_concat(&storage, bound, bound, Some(key_hash))?;
         let merged = TwoMergeIterator::create(l0_merge, l1_concat)?;
 
         if !merged.is_valid() || merged.key().raw_ref() != key || merged.value().is_empty() {
@@ -439,8 +440,8 @@ impl LsmStorageInner {
             Arc::clone(&guard)
         };
         let memtable_merge = Self::create_memtable_merge(&snapshot, lower, upper);
-        let l0_merge = Self::create_l0_merge(&snapshot, lower, upper)?;
-        let l1_concat = Self::create_l1_concat(&snapshot, lower, upper)?;
+        let l0_merge = Self::create_l0_merge(&snapshot, lower, upper, None)?;
+        let l1_concat = Self::create_l1_concat(&snapshot, lower, upper, None)?;
 
         let memory_and_l0 = TwoMergeIterator::create(memtable_merge, l0_merge)?;
         let all_sources = TwoMergeIterator::create(memory_and_l0, l1_concat)?;
@@ -481,6 +482,7 @@ impl LsmStorageInner {
         snapshot: &LsmStorageState,
         lower: Bound<&[u8]>,
         upper: Bound<&[u8]>,
+        key_hash: Option<u32>,
     ) -> Result<MergeIterator<SsTableIterator>> {
         let mut iters = Vec::with_capacity(snapshot.l0_sstables.len());
         for sst_id in &snapshot.l0_sstables {
@@ -492,6 +494,11 @@ impl LsmStorageInner {
             if !Self::sst_overlaps_range(lower, upper, table) {
                 continue;
             };
+            if let (Some(bloom), Some(hash)) = (&table.bloom, key_hash)
+                && !bloom.may_contain(hash)
+            {
+                continue;
+            }
             let mut iter = match lower {
                 Bound::Unbounded => SsTableIterator::create_and_seek_to_first(Arc::clone(table))?,
                 Bound::Included(bytes) | Bound::Excluded(bytes) => {
@@ -516,6 +523,7 @@ impl LsmStorageInner {
         snapshot: &LsmStorageState,
         lower: Bound<&[u8]>,
         upper: Bound<&[u8]>,
+        key_hash: Option<u32>,
     ) -> Result<SstConcatIterator> {
         let l1_ids = &snapshot.levels[0].1;
         let mut tables = Vec::with_capacity(l1_ids.len());
@@ -525,6 +533,11 @@ impl LsmStorageInner {
                 .get(sst_id)
                 .ok_or_else(|| anyhow::anyhow!("SST {sst_id} not found"))?;
             if !Self::sst_overlaps_range(lower, upper, table) {
+                continue;
+            }
+            if let (Some(bloom), Some(hash)) = (&table.bloom, key_hash)
+                && !bloom.may_contain(hash)
+            {
                 continue;
             }
             tables.push(Arc::clone(table));

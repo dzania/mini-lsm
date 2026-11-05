@@ -85,16 +85,19 @@ impl BlockIterator {
         let offset = self.block.offsets[idx] as usize;
 
         let mut entry = &self.block.data[offset..];
+        let overlap = entry.get_u16() as usize;
+        let suffix_len = entry.get_u16() as usize;
 
-        let key_len = entry.get_u8() as usize;
-        let key = KeyVec::from_vec(entry[..key_len].to_vec());
+        let mut key = self.first_key.raw_ref()[..overlap].to_vec();
+        key.extend_from_slice(&entry[..suffix_len]);
+        let key = KeyVec::from_vec(key);
         self.key = key;
-        entry.advance(key_len);
-        let value_len = entry.get_u8() as usize;
-        // current offset + size of key_len + key + size of value_len
-        let value_start = offset + 1 + key_len + 1;
+        entry.advance(suffix_len);
+        let value_len = entry.get_u16() as usize;
+        // Value starts after the overlap length (2 bytes), suffix length (2 bytes),
+        // suffix bytes, and value length (2 bytes), relative to the entry offset
+        let value_start = offset + 2 + 2 + suffix_len + 2;
         self.value_range = (value_start, value_start + value_len);
-        entry.advance(value_len);
     }
 
     /// Move to the next key in the block.

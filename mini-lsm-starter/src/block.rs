@@ -58,8 +58,9 @@ impl Block {
 
     pub(crate) fn get_first_key(&self) -> KeyVec {
         let mut buf = &self.data[..];
-        let key_len = buf.get_u8();
-        let key = &buf[..key_len as usize];
+        let overlap = buf.get_u16();
+        let suffix_len = buf.get_u16();
+        let key = &buf[..suffix_len as usize];
         KeyVec::from_vec(key.to_vec())
     }
 }
