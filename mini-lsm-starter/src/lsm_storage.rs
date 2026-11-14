@@ -316,8 +316,8 @@ impl LsmStorageInner {
         let bound = Bound::Included(key);
         let key_hash = farmhash::fingerprint32(key);
         let l0_merge = Self::create_l0_merge(&storage, bound, bound, Some(key_hash))?;
-        let l1_concat = Self::create_l1_concat(&storage, bound, bound, Some(key_hash))?;
-        let merged = TwoMergeIterator::create(l0_merge, l1_concat)?;
+        let lower_levels = Self::create_levels_merge(&storage, bound, bound, Some(key_hash))?;
+        let merged = TwoMergeIterator::create(l0_merge, lower_levels)?;
 
         if !merged.is_valid() || merged.key().raw_ref() != key || merged.value().is_empty() {
             return Ok(None);
@@ -441,10 +441,10 @@ impl LsmStorageInner {
         };
         let memtable_merge = Self::create_memtable_merge(&snapshot, lower, upper);
         let l0_merge = Self::create_l0_merge(&snapshot, lower, upper, None)?;
-        let l1_concat = Self::create_l1_concat(&snapshot, lower, upper, None)?;
+        let lower_levels = Self::create_levels_merge(&snapshot, lower, upper, None)?;
 
         let memory_and_l0 = TwoMergeIterator::create(memtable_merge, l0_merge)?;
-        let all_sources = TwoMergeIterator::create(memory_and_l0, l1_concat)?;
+        let all_sources = TwoMergeIterator::create(memory_and_l0, lower_levels)?;
         let lsm_iter = LsmIterator::new(all_sources, upper.map(Bytes::copy_from_slice))?;
 
         Ok(FusedIterator::new(lsm_iter))
@@ -517,6 +517,51 @@ impl LsmStorageInner {
             iters.push(Box::new(iter));
         }
         Ok(MergeIterator::create(iters))
+    }
+
+    fn create_levels_merge(
+        snapshot: &LsmStorageState,
+        lower: Bound<&[u8]>,
+        upper: Bound<&[u8]>,
+        key_hash: Option<u32>,
+    ) -> Result<MergeIterator<SstConcatIterator>> {
+        // TODO: Compute capacity
+        let mut level_iters = Vec::with_capacity(snapshot.levels.len());
+        for (_, sst_ids) in &snapshot.levels {
+            let mut tables = Vec::with_capacity(sst_ids.len());
+            for id in sst_ids {
+                let table = snapshot
+                    .sstables
+                    .get(id)
+                    .ok_or_else(|| anyhow::anyhow!("SST {id} not found"))?;
+                if !Self::sst_overlaps_range(lower, upper, table) {
+                    continue;
+                }
+                if let (Some(bloom), Some(hash)) = (&table.bloom, key_hash)
+                    && !bloom.may_contain(hash)
+                {
+                    continue;
+                }
+                tables.push(Arc::clone(table));
+            }
+            if tables.is_empty() {
+                continue;
+            }
+            let mut iter = match lower {
+                Bound::Unbounded => SstConcatIterator::create_and_seek_to_first(tables)?,
+                Bound::Included(bytes) | Bound::Excluded(bytes) => {
+                    SstConcatIterator::create_and_seek_to_key(tables, KeySlice::from_slice(bytes))?
+                }
+            };
+            if let Bound::Excluded(bytes) = lower
+                && iter.is_valid()
+                && iter.key().raw_ref() == bytes
+            {
+                iter.next()?;
+            }
+            level_iters.push(Box::new(iter));
+        }
+        Ok(MergeIterator::create(level_iters))
     }
 
     fn create_l1_concat(

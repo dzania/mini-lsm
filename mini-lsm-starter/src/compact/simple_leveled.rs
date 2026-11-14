@@ -47,9 +47,44 @@ impl SimpleLeveledCompactionController {
     /// Returns `None` if no compaction needs to be scheduled. The order of SSTs in the compaction task id vector matters.
     pub fn generate_compaction_task(
         &self,
-        _snapshot: &LsmStorageState,
+        snapshot: &LsmStorageState,
     ) -> Option<SimpleLeveledCompactionTask> {
-        unimplemented!()
+        if snapshot.l0_sstables.len() >= self.options.level0_file_num_compaction_trigger {
+            let l1_sstables = snapshot
+                .levels
+                .first()
+                .expect("L1 SSTs not found for compaction")
+                .1
+                .clone();
+            return Some(SimpleLeveledCompactionTask {
+                upper_level: None,
+                upper_level_sst_ids: snapshot.l0_sstables.clone(),
+                lower_level: 1,
+                lower_level_sst_ids: l1_sstables,
+                is_lower_level_bottom_level: snapshot.levels.len() == 1,
+            });
+        }
+
+        for pair in snapshot.levels.windows(2) {
+            let (upper_level, upper_ids) = &pair[0];
+            let (lower_level, lower_ids) = &pair[1];
+            // Division by 0
+            if upper_ids.is_empty() {
+                continue;
+            };
+            let ratio = lower_ids.len() as f64 / upper_ids.len() as f64 * 100.0;
+            if ratio < self.options.size_ratio_percent as f64 {
+                return Some(SimpleLeveledCompactionTask {
+                    upper_level: Some(*upper_level),
+                    upper_level_sst_ids: upper_ids.to_vec(),
+                    lower_level: *lower_level,
+                    lower_level_sst_ids: lower_ids.to_vec(),
+                    is_lower_level_bottom_level: *lower_level == self.options.max_levels,
+                });
+            }
+        }
+
+        None
     }
 
     /// Apply the compaction result.
@@ -61,10 +96,47 @@ impl SimpleLeveledCompactionController {
     /// in your implementation.
     pub fn apply_compaction_result(
         &self,
-        _snapshot: &LsmStorageState,
-        _task: &SimpleLeveledCompactionTask,
-        _output: &[usize],
+        snapshot: &LsmStorageState,
+        task: &SimpleLeveledCompactionTask,
+        output: &[usize],
     ) -> (LsmStorageState, Vec<usize>) {
-        unimplemented!()
+        let mut new_state = snapshot.clone();
+        match task.upper_level {
+            None => {
+                assert!(
+                    task.upper_level_sst_ids
+                        .iter()
+                        .all(|id| snapshot.l0_sstables.contains(id)),
+                    "compaction inputs must still exist in L0"
+                );
+                new_state
+                    .l0_sstables
+                    .retain(|id| !task.upper_level_sst_ids.contains(id));
+            }
+            Some(level) => {
+                assert_eq!(
+                    snapshot.levels[level - 1].1,
+                    task.upper_level_sst_ids,
+                    "upper-level files must match compaction inputs"
+                );
+                new_state.levels[level - 1].1.clear();
+            }
+        }
+
+        assert_eq!(
+            snapshot.levels[task.lower_level - 1].1,
+            task.lower_level_sst_ids,
+            "lower-level files must match compaction inputs"
+        );
+        new_state.levels[task.lower_level - 1].1 = output.to_vec();
+
+        let obsolete_ids = task
+            .upper_level_sst_ids
+            .iter()
+            .chain(&task.lower_level_sst_ids)
+            .copied()
+            .collect();
+        // L0
+        (new_state, obsolete_ids)
     }
 }
